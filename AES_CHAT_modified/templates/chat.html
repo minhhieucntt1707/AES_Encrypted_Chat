@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Private Secure AES Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.1.1/crypto-js.min.js"></script>
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+
+  <style>
+    body {
+      font-family: 'Lato', sans-serif;
+      padding-top: 30px;
+    }
+
+    .chat-container {
+      max-width: 1200px;
+      margin: auto;
+    }
+
+    #chatBox {
+      height: 400px;
+      overflow-y: auto;
+      border: 1px solid #ccc;
+      padding: 15px;
+      border-radius: 8px;
+    }
+
+    #chatBox div {
+      margin-bottom: 10px;
+    }
+
+    .card-login {
+      max-width: 400px;
+      margin: auto;
+    }
+
+    .user-list {
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .header-title {
+      font-family: 'Montserrat', sans-serif;
+      text-align: center;
+      padding: 40px 0 20px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container chat-container">
+    <h1 class="header-title text-danger">Secured Private Chat</h1>
+
+    <div id="loginSection" class="card card-login shadow p-4 mb-5">
+      <input type="text" id="usernameInput" class="form-control mb-3" placeholder="Enter your name" />
+      <button class="btn btn-primary w-100" onclick="login()">Login</button>
+    </div>
+
+    <div id="chatSection" style="display: none;">
+      <div class="row">
+        <!-- User List -->
+        <div class="col-md-4">
+          <h5>Online Users</h5>
+          <ul id="usersList" class="list-group user-list"></ul>
+        </div>
+
+        <!-- Chat Panel -->
+        <div class="col-md-8">
+          <div class="mb-2">
+            <strong>Chatting with:</strong> <span id="chatWithName">[None]</span>
+          </div>
+
+          <input type="text" id="keyInput" class="form-control mb-2" placeholder="Enter AES key" autocomplete="off" />
+          <div id="keyStatus" class="mb-2 text-danger"></div>
+
+          <div id="chatBox" class="mb-3"></div>
+
+          <textarea id="messageInput" class="form-control mb-2" rows="3" placeholder="Type your message..." disabled></textarea>
+          <div class="d-flex gap-2">
+            <button class="btn btn-success flex-fill" onclick="sendMessage()" id="sendBtn" disabled>Send</button>
+            <button class="btn btn-secondary" onclick="logout()">Logout</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const socket = io();
+  let username = "";
+  let chatWith = "";
+  let correctKey = null;
+
+  function login() {
+  const input = document.getElementById("usernameInput");
+  if (!input.value.trim()) {
+    alert("Please enter your username.");
+    return;
+  }
+  username = input.value.trim();
+  socket.emit("login", { username }); 
+
+    document.getElementById("loginSection").style.display = "none";
+    document.getElementById("chatSection").style.display = "block";
+  }
+
+  socket.on("users_update", (users) => {
+  const ul = document.getElementById("usersList");
+  ul.innerHTML = "";
+  users.forEach(user => {
+    const li = document.createElement("li");
+    if (user === username) {
+      li.textContent = `${user} (You)`;
+      li.classList.add("list-group-item", "text-muted");
+    } else {
+      li.textContent = user;
+      li.classList.add("list-group-item", "list-group-item-action");
+      li.style.cursor = "pointer";
+      li.onclick = () => selectUserToChat(user);
+    }
+    ul.appendChild(li);
+  });
+});
+
+  function selectUserToChat(user) {
+    chatWith = user;
+    document.getElementById("chatWithName").textContent = user;
+    document.getElementById("chatBox").innerHTML = "";
+    document.getElementById("messageInput").value = "";
+    document.getElementById("keyInput").value = "";
+    document.getElementById("keyStatus").textContent = "Please enter the AES key to start chatting.";
+    disableChat(true);
+    correctKey = null;
+    socket.emit("request_history", { chatWith: user });
+  }
+
+  function disableChat(disabled) {
+    document.getElementById("messageInput").disabled = disabled;
+    document.getElementById("sendBtn").disabled = disabled;
+  }
+
+  function tryKeyAndEnableChat(keyStr) {
+    if (!chatWith) {
+      document.getElementById("keyStatus").textContent = "Select a user to chat with first.";
+      disableChat(true);
+      return;
+    }
+
+    if (!keyStr) {
+      document.getElementById("keyStatus").textContent = "Please enter the AES key.";
+      disableChat(true);
+      correctKey = null;
+      return;
+    }
+
+    correctKey = CryptoJS.PBKDF2(keyStr, CryptoJS.enc.Utf8.parse("static_salt"), {
+      keySize: 256/32,
+      iterations: 1000
+    });
+
+    const chatBox = document.getElementById("chatBox");
+
+    if (chatBox.children.length === 0) {
+      document.getElementById("keyStatus").textContent = "Key accepted. You can now chat.";
+      disableChat(false);
+      return;
+    }
+
+    const firstMsg = chatBox.children[0];
+    const encryptedPayload = firstMsg.dataset.encryptedData;
+    const [ivHex, encrypted] = encryptedPayload.split(":");
+
+    try {
+      const iv = CryptoJS.enc.Hex.parse(ivHex);
+      const decrypted = CryptoJS.AES.decrypt(encrypted, correctKey, {
+        iv: iv,
+        mode: CryptoJS.mode.CBC,
+        padding: CryptoJS.pad.Pkcs7
+      }).toString(CryptoJS.enc.Utf8);
+
+      if (decrypted) {
+        document.getElementById("keyStatus").textContent = "Key accepted. You can now chat.";
+        disableChat(false);
+      } else {
+        throw new Error("Decryption failed");
+      }
+    } catch {
+      document.getElementById("keyStatus").textContent = "Incorrect key! Please try again.";
+      disableChat(true);
+      correctKey = null;
+    }
+  }
+
+  document.getElementById("keyInput").addEventListener("input", (e) => {
+    tryKeyAndEnableChat(e.target.value.trim());
+  });
+
+  socket.on("receive_message", (msg) => {
+    if ((msg.from === chatWith && msg.to === username) || (msg.from === username && msg.to === chatWith)) {
+      displayMessage(msg);
+    }
+  });
+
+  function displayMessage(msg) {
+    const chatBox = document.getElementById("chatBox");
+    const div = document.createElement("div");
+    div.dataset.encryptedData = msg.data;
+
+    const [ivHex, encrypted] = msg.data.split(":");
+    const iv = CryptoJS.enc.Hex.parse(ivHex);
+    let decrypted = "[Enter key to decrypt]";
+
+    if (correctKey) {
+      try {
+        decrypted = CryptoJS.AES.decrypt(encrypted, correctKey, {
+          iv: iv,
+          mode: CryptoJS.mode.CBC,
+          padding: CryptoJS.pad.Pkcs7
+        }).toString(CryptoJS.enc.Utf8);
+        decrypted = decrypted || "[Cannot decrypt message]";
+      } catch {
+        decrypted = "[Cannot decrypt message]";
+      }
+    }
+
+    const sender = msg.from === username ? "You" : msg.from;
+    const timestamp = new Date().toLocaleTimeString();
+    div.innerHTML = `<b>${escapeHtml(sender)}</b> <small class="text-muted">${timestamp}</small>: ${escapeHtml(decrypted)}`;
+    chatBox.appendChild(div);
+    chatBox.scrollTop = chatBox.scrollHeight;
+  }
+
+  function sendMessage() {
+    if (!chatWith) {
+      alert("Select a user to chat with.");
+      return;
+    }
+
+    const message = document.getElementById("messageInput").value.trim();
+    if (!message || !correctKey) return;
+
+    const iv = CryptoJS.lib.WordArray.random(16);
+    const encrypted = CryptoJS.AES.encrypt(message, correctKey, {
+      iv: iv,
+      mode: CryptoJS.mode.CBC,
+      padding: CryptoJS.pad.Pkcs7
+    }).toString();
+
+    const payload = iv.toString(CryptoJS.enc.Hex) + ":" + encrypted;
+    socket.emit("send_message", {
+      to: chatWith,
+      data: payload
+    });
+
+    document.getElementById("messageInput").value = "";
+  }
+
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, c => (
+      { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[c]
+    ));
+  }
+
+  function logout() {
+    location.reload();
+  }
+</script>
+
+</body>
+</html>
